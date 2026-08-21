@@ -162,28 +162,32 @@ def find_expiration_date(text):
 
 def find_invoice_number(text):
     patterns = [
-        # Tax Invoice : DSP05201803250022
-        r"(?i)\btax\s+invoice\s*[:\-]?\s*([A-Z0-9][A-Z0-9./_-]{3,})",
+        # Kita kembalikan logika lookahead (?=[\s:\-]|$) yang sangat brilian ini!
+        r"(?i)\b(?:tax\s*invoice|cash\s+inv|invoice|involce|inv)\b"
+        r"\s*(?:#|(?:no\.?|number|[a-z]+)(?=[\s:\-]|$))?"
+        r"\s*[:\-]?\s*"
+        r"([A-Z0-9./_-]{3,})",
 
-        # Invoice No : INV001
-        r"(?i)\binvoice\s*(?:number|no\.?|#)\s*[:\-]?\s*([A-Z0-9][A-Z0-9./_-]{3,})",
-
-        # Receipt : CS00084670
-        r"(?i)\breceipt\s*[:\-]?\s*([A-Z0-9][A-Z0-9./_-]{3,})"
+        r"(?i)(?:no\.?\s*invoice|no\.?\s*involce)\s*[:\-]?\s*([A-Z0-9./_-]{3,})",
+        r"(?i)\breceipt\s*[:\-]?\s*([A-Z0-9./_-]{3,})",
+        r"\b([A-Z]{2,5}-\d{2,}-\d{4,})\b"
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text)
-
-        if match:
-            return match.group(1).strip()
+        for match in re.finditer(pattern, text):
+            candidate = match.group(1).strip()
+            if any(char.isdigit() for char in candidate):
+                return candidate
 
     return None
 
-
 def find_invoice_date(text):
     patterns = [
-        r"(?i)\bdate\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        # Format dengan label (Date:, Tgl:, DD:)
+        r"(?i)\b(?:date|tgl|dd)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        # Format teks nama bulan (07 May 2018 / 06 Jun 2018)
+        r"(?i)\b(\d{1,2}\s+(?:Jan(?:uari)?|Feb(?:ruari)?|Mar(?:et)?|Apr(?:il)?|May|Mei|Jun(?:i)?|Jul(?:i)?|Aug|Agu(?:stus)?|Sep(?:tember)?|Oct|Okt(?:ober)?|Nov(?:ember)?|Dec|Des(?:ember)?)\s+\d{2,4})\b",
+        # Tanggal mandiri tanpa label (20/06/18 atau 25/03/2018)
         r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"
     ]
 
@@ -208,10 +212,11 @@ def find_total_amount(text):
     ]
 
     pattern = (
-        r"(?i)\btotal\s*"
-        r"(?:\(?(?:RM|USD|IDR)\)?)?"
+        r"(?i)\b(?:grand\s+total|nett\s+total|net\s+total|total\s+amount|total\s+gross|total|jumlah)\b"
+        r"(?:\s+(?:sales|incl|excl|supply|supplies|due))*"
+        r"(?:\s*(?:\(?(?:RM|USD|IDR|RP|\$)\)?))?"
         r"\s*[:\-]?\s*"
-        r"([0-9]+[.,][0-9]{2})"
+        r"[$RM\s]*([0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]{2})?|[0-9]+[.,][0-9]{2})"
     )
 
     candidates = []
@@ -226,7 +231,6 @@ def find_total_amount(text):
         candidates.append(match.group(1))
 
     return candidates[-1] if candidates else None
-
 
 def find_total_from_ocr(ocr_results):
     excluded = [
@@ -245,30 +249,72 @@ def find_total_from_ocr(ocr_results):
         if any(word in text for word in excluded):
             continue
 
-        if text == "total" or text.startswith("total ") or "total (rm)" in text:
-
-            # Angka dalam box yang sama
-            match = re.search(
-                r"(\d+[.,]\d{2})",
-                item["text"]
-            )
-
+        if any(k in text for k in ["total", "grand", "nett", "net total", "amount"]):
+            # Cek di box yang sama
+            match = re.search(r"([0-9]{1,3}(?:\.[0-9]{3})+|[0-9]+[.,][0-9]{2})", item["text"])
             if match:
                 return match.group(1)
 
-            # Angka pada box setelahnya
-            if i + 1 < len(ocr_results):
-                match = re.search(
-                    r"(\d+[.,]\d{2})",
-                    ocr_results[i + 1]["text"]
-                )
+            # Cek hingga 10 box ke depan
+            for j in range(1, 10):
+                if i + j < len(ocr_results):
+                    next_text = ocr_results[i + j]["text"]
+                    match = re.search(r"([0-9]{1,3}(?:\.[0-9]{3})+|[0-9]+[.,][0-9]{2})", next_text)
+                    if match:
+                        return match.group(1)
 
-                if match:
-                    return match.group(1)
+    return None
+
+def find_invoice_number_from_ocr(ocr_results):
+    keyword_pattern = re.compile(r"(?i)nvoice")
+
+    for i, item in enumerate(ocr_results):
+        text = item["text"].strip()
+
+        if not keyword_pattern.search(text):
+            continue
+
+        match = re.search(r"([A-Z0-9./_-]{5,})\s*$", text, re.IGNORECASE)
+        if match and any(c.isdigit() for c in match.group(1)):
+            return match.group(1)
+
+        if i + 1 < len(ocr_results):
+            candidate = ocr_results[i + 1]["text"].strip()
+            if any(c.isdigit() for c in candidate) and len(candidate) >= 3:
+                return candidate
+
+    return None
+
+def find_invoice_number_from_ocr(ocr_results):
+    """
+    Fallback berbasis box OCR (bukan raw_text gabungan).
+    Pakai substring 'nvoice' (bukan 'invoice' penuh) karena huruf
+    pertama sering salah baca jadi 'lnvoice' / '1nvoice' saat
+    confidence box rendah — jadi tetap ke-detect walau typo.
+    """
+    keyword_pattern = re.compile(r"(?i)nvoice")
+
+    for i, item in enumerate(ocr_results):
+        text = item["text"].strip()
+
+        if not keyword_pattern.search(text):
+            continue
+
+        # kasus 1: angka nempel di box yang sama, misal "Invoice number: 01000339450"
+        match = re.search(r"([A-Z0-9./_-]{5,})\s*$", text, re.IGNORECASE)
+        if match and any(c.isdigit() for c in match.group(1)):
+            return match.group(1)
+
+        # kasus 2: label & angka kepisah jadi 2 box, angka ada di box berikutnya
+        if i + 1 < len(ocr_results):
+            candidate = ocr_results[i + 1]["text"].strip()
+            if any(c.isdigit() for c in candidate) and len(candidate) >= 3:
+                return candidate
 
     return None
 
 
+    
 # =========================================================
 # MAIN EXTRACTION
 # =========================================================
@@ -303,16 +349,19 @@ def extract_fields(
 
     if document_type == "INVOICE":
         total = find_total_amount(text)
+    if not total:
+        total = find_total_from_ocr(ocr_results)
 
-        if not total:
-            total = find_total_from_ocr(ocr_results)
+    invoice_number = find_invoice_number(text)
+    if not invoice_number:                                   # <-- tambahan
+        invoice_number = find_invoice_number_from_ocr(ocr_results)
 
-        return {
-            "invoice_number": find_invoice_number(text),
-            "date": find_invoice_date(text),
-            "total_amount": total,
-            "raw_text": raw_text or None
-        }
+    return {
+        "invoice_number": invoice_number,
+        "date": find_invoice_date(text),
+        "total_amount": total,
+        "raw_text": raw_text or None
+    }
 
     if document_type == "REAL_LIFE":
         return {
