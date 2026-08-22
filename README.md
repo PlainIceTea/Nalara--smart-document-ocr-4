@@ -1,3 +1,4 @@
+# NALARA ACADEMY - Kelompok 4
 # Smart Document OCR & Validation
 
 Aplikasi sederhana untuk OCR dokumen menggunakan **EasyOCR**, dilanjutkan dengan information extraction dan rule-based validation.
